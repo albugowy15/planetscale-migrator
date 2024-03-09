@@ -3,9 +3,9 @@ package main
 import (
 	"crypto/tls"
 	"flag"
-	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/go-sql-driver/mysql"
@@ -24,36 +24,45 @@ func init() {
 		log.Fatalf("error load .env: %v", err)
 	}
 
-	mysql.RegisterTLSConfig("tidb", &tls.Config{
+	err = mysql.RegisterTLSConfig("tidb", &tls.Config{
 		MinVersion: tls.VersionTLS12,
 		ServerName: os.Getenv("DBHOST"),
 	})
+	if err != nil {
+		log.Fatalf("error register tls config: %v", err)
+	}
 }
 
-func execSqlFile(db *sqlx.DB, path string) {
-	_, err := sqlx.LoadFile(db, path)
+func execSqlFile(tx *sqlx.Tx, path string) {
+	result, err := sqlx.LoadFile(tx, path)
 	if err != nil {
-		log.Println("err read file", err)
+		log.Fatalf("error execute %s: %v", path, err)
 	}
+	rows, err := (*result).RowsAffected()
+	if err != nil {
+		log.Fatalln(err)
+	}
+	log.Printf("%d affected\n", rows)
 }
 
 func main() {
-	db, err := sqlx.Connect("mysql", os.Getenv("DATABASE_URL"))
-	if err != nil {
-		log.Fatalf("err connect to db: %v", err)
-	}
+	db := sqlx.MustConnect("mysql", os.Getenv("DATABASE_URL"))
+	defer db.Close()
 
 	flag.StringVar(&fileFlag, "file", "default", "execute a sql file")
 	flag.StringVar(&dirFlag, "dir", "default", "execute all sql file from a dir")
 	flag.Parse()
 
+	tx := db.MustBegin()
+
 	if fileFlag != "default" {
 		if strings.HasSuffix(fileFlag, ".sql") {
-			execSqlFile(db, fileFlag)
+			execSqlFile(tx, fileFlag)
 		} else {
 			log.Fatalf("%s is not valid sql file", fileFlag)
 		}
 	}
+
 	if dirFlag != "default" {
 		entry, err := os.ReadDir(dirFlag)
 		if err != nil {
@@ -61,10 +70,11 @@ func main() {
 		}
 		for _, file := range entry {
 			if strings.HasSuffix(file.Name(), ".sql") {
-				log.Println("execute:", file.Name())
-				path := fmt.Sprintf("%s/%s", dirFlag, file.Name())
-				execSqlFile(db, path)
+				log.Println("execute", file.Name())
+				path := filepath.Join(dirFlag, file.Name())
+				execSqlFile(tx, path)
 			}
 		}
 	}
+	tx.Commit()
 }
